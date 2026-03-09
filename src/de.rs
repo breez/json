@@ -110,6 +110,8 @@ pub(crate) enum ParserNumber {
     F64(f64),
     U64(u64),
     I64(i64),
+    U128(u128),
+    I128(i128),
     #[cfg(feature = "arbitrary_precision")]
     String(String),
 }
@@ -123,6 +125,8 @@ impl ParserNumber {
             ParserNumber::F64(x) => visitor.visit_f64(x),
             ParserNumber::U64(x) => visitor.visit_u64(x),
             ParserNumber::I64(x) => visitor.visit_i64(x),
+            ParserNumber::U128(x) => visitor.visit_u128(x),
+            ParserNumber::I128(x) => visitor.visit_i128(x),
             #[cfg(feature = "arbitrary_precision")]
             ParserNumber::String(x) => visitor.visit_map(NumberDeserializer { number: x.into() }),
         }
@@ -133,6 +137,9 @@ impl ParserNumber {
             ParserNumber::F64(x) => de::Error::invalid_type(Unexpected::Float(x), exp),
             ParserNumber::U64(x) => de::Error::invalid_type(Unexpected::Unsigned(x), exp),
             ParserNumber::I64(x) => de::Error::invalid_type(Unexpected::Signed(x), exp),
+            ParserNumber::U128(_) | ParserNumber::I128(_) => {
+                de::Error::invalid_type(Unexpected::Other("128-bit integer"), exp)
+            }
             #[cfg(feature = "arbitrary_precision")]
             ParserNumber::String(_) => de::Error::invalid_type(Unexpected::Other("number"), exp),
         }
@@ -506,6 +513,51 @@ impl<'de, R: Read<'de>> Deserializer<R> {
         }
     }
 
+    /// Like `parse_integer` but overflows from u64 to u128 instead of f64.
+    /// Used by `parse_any_number` so that `deserialize_any` can produce
+    /// `visit_u128`/`visit_i128` instead of a lossy `visit_f64`.
+    fn parse_integer_u128(&mut self, positive: bool) -> Result<ParserNumber> {
+        let next = match tri!(self.next_char()) {
+            Some(b) => b,
+            None => {
+                return Err(self.error(ErrorCode::EofWhileParsingValue));
+            }
+        };
+
+        match next {
+            b'0' => {
+                // There can be only one leading '0'.
+                match tri!(self.peek_or_null()) {
+                    b'0'..=b'9' => Err(self.peek_error(ErrorCode::InvalidNumber)),
+                    _ => self.parse_number(positive, 0),
+                }
+            }
+            c @ b'1'..=b'9' => {
+                let mut significand = (c - b'0') as u64;
+
+                loop {
+                    match tri!(self.peek_or_null()) {
+                        c @ b'0'..=b'9' => {
+                            let digit = (c - b'0') as u64;
+
+                            if overflow!(significand * 10 + digit, u64::MAX) {
+                                return self
+                                    .parse_u128_integer(positive, significand as u128);
+                            }
+
+                            self.eat_char();
+                            significand = significand * 10 + digit;
+                        }
+                        _ => {
+                            return self.parse_number(positive, significand);
+                        }
+                    }
+                }
+            }
+            _ => Err(self.error(ErrorCode::InvalidNumber)),
+        }
+    }
+
     fn parse_number(&mut self, positive: bool, significand: u64) -> Result<ParserNumber> {
         Ok(match tri!(self.peek_or_null()) {
             b'.' => ParserNumber::F64(tri!(self.parse_decimal(positive, significand, 0))),
@@ -525,6 +577,42 @@ impl<'de, R: Read<'de>> Deserializer<R> {
                 }
             }
         })
+    }
+
+    fn parse_u128_integer(
+        &mut self,
+        positive: bool,
+        mut significand: u128,
+    ) -> Result<ParserNumber> {
+        loop {
+            match tri!(self.peek_or_null()) {
+                c @ b'0'..=b'9' => {
+                    let digit = (c - b'0') as u128;
+
+                    if overflow!(significand * 10 + digit, u128::MAX) {
+                        return Ok(ParserNumber::F64(tri!(
+                            self.parse_long_integer_u128(positive, significand),
+                        )));
+                    }
+
+                    self.eat_char();
+                    significand = significand * 10 + digit;
+                }
+                b'.' | b'e' | b'E' => {
+                    return Ok(ParserNumber::F64(tri!(
+                        self.parse_long_integer_u128(positive, significand),
+                    )));
+                }
+                _ => {
+                    if positive {
+                        return Ok(ParserNumber::U128(significand));
+                    } else {
+                        let neg = -(significand as i128);
+                        return Ok(ParserNumber::I128(neg));
+                    }
+                }
+            }
+        }
     }
 
     fn parse_decimal(
@@ -739,6 +827,72 @@ impl<'de, R: Read<'de>> Deserializer<R> {
 
     #[cfg(feature = "float_roundtrip")]
     #[cold]
+    #[inline(never)]
+    fn parse_long_integer_u128(&mut self, positive: bool, partial_significand: u128) -> Result<f64> {
+        self.scratch.clear();
+        self.scratch
+            .extend_from_slice(itoa::Buffer::new().format(partial_significand).as_bytes());
+
+        loop {
+            match tri!(self.peek_or_null()) {
+                c @ b'0'..=b'9' => {
+                    self.scratch.push(c);
+                    self.eat_char();
+                }
+                b'.' => {
+                    self.eat_char();
+                    return self.parse_long_decimal(positive, self.scratch.len());
+                }
+                b'e' | b'E' => {
+                    return self.parse_long_exponent(positive, self.scratch.len());
+                }
+                _ => {
+                    return self.f64_long_from_parts(positive, self.scratch.len(), 0);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "float_roundtrip"))]
+    #[cold]
+    #[inline(never)]
+    fn parse_long_integer_u128(&mut self, positive: bool, significand: u128) -> Result<f64> {
+        // Convert u128 significand to f64 with the most significant bits
+        // preserved via u64 + exponent, matching parse_long_integer's approach.
+        let mut sig_u64 = significand as u64;
+        let mut base_exponent: i32 = 0;
+        {
+            let mut temp = significand;
+            // Find how many digits the u128 has beyond u64's range
+            while temp > u64::MAX as u128 {
+                temp /= 10;
+                base_exponent += 1;
+            }
+            sig_u64 = temp as u64;
+        }
+
+        let mut exponent = base_exponent;
+        loop {
+            match tri!(self.peek_or_null()) {
+                b'0'..=b'9' => {
+                    self.eat_char();
+                    exponent += 1;
+                }
+                b'.' => {
+                    return self.parse_decimal(positive, sig_u64, exponent);
+                }
+                b'e' | b'E' => {
+                    return self.parse_exponent(positive, sig_u64, exponent);
+                }
+                _ => {
+                    return self.f64_from_parts(positive, sig_u64, exponent);
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "float_roundtrip")]
+    #[cold]
     fn parse_long_decimal(&mut self, positive: bool, integer_end: usize) -> Result<f64> {
         let mut at_least_one_digit = integer_end < self.scratch.len();
         while let c @ b'0'..=b'9' = tri!(self.peek_or_null()) {
@@ -931,7 +1085,7 @@ impl<'de, R: Read<'de>> Deserializer<R> {
 
     #[cfg(not(feature = "arbitrary_precision"))]
     fn parse_any_number(&mut self, positive: bool) -> Result<ParserNumber> {
-        self.parse_integer(positive)
+        self.parse_integer_u128(positive)
     }
 
     #[cfg(feature = "arbitrary_precision")]
@@ -942,12 +1096,18 @@ impl<'de, R: Read<'de>> Deserializer<R> {
         }
         tri!(self.scan_integer(&mut buf));
         if positive {
-            if let Ok(unsigned) = buf.parse() {
-                return Ok(ParserNumber::U64(unsigned));
+            if let Ok(u) = buf.parse::<u64>() {
+                return Ok(ParserNumber::U64(u));
+            }
+            if let Ok(u) = buf.parse::<u128>() {
+                return Ok(ParserNumber::U128(u));
             }
         } else {
-            if let Ok(signed) = buf.parse() {
-                return Ok(ParserNumber::I64(signed));
+            if let Ok(i) = buf.parse::<i64>() {
+                return Ok(ParserNumber::I64(i));
+            }
+            if let Ok(i) = buf.parse::<i128>() {
+                return Ok(ParserNumber::I128(i));
             }
         }
         Ok(ParserNumber::String(buf))

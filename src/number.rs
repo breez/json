@@ -31,6 +31,10 @@ enum N {
     NegInt(i64),
     /// Always finite.
     Float(f64),
+    /// Positive integer that doesn't fit in u64.
+    PosInt128(u128),
+    /// Negative integer that doesn't fit in i64.
+    NegInt128(i128),
 }
 
 #[cfg(not(feature = "arbitrary_precision"))]
@@ -40,6 +44,8 @@ impl PartialEq for N {
             (N::PosInt(a), N::PosInt(b)) => a == b,
             (N::NegInt(a), N::NegInt(b)) => a == b,
             (N::Float(a), N::Float(b)) => a == b,
+            (N::PosInt128(a), N::PosInt128(b)) => a == b,
+            (N::NegInt128(a), N::NegInt128(b)) => a == b,
             _ => false,
         }
     }
@@ -65,6 +71,8 @@ impl Hash for N {
                     f.to_bits().hash(h);
                 }
             }
+            N::PosInt128(i) => i.hash(h),
+            N::NegInt128(i) => i.hash(h),
         }
     }
 }
@@ -83,7 +91,7 @@ impl Number {
         match self.n {
             N::PosInt(v) => v <= i64::MAX as u64,
             N::NegInt(_) => true,
-            N::Float(_) => false,
+            N::Float(_) | N::PosInt128(_) | N::NegInt128(_) => false,
         }
         #[cfg(feature = "arbitrary_precision")]
         self.as_i64().is_some()
@@ -97,7 +105,7 @@ impl Number {
         #[cfg(not(feature = "arbitrary_precision"))]
         match self.n {
             N::PosInt(_) => true,
-            N::NegInt(_) | N::Float(_) => false,
+            N::NegInt(_) | N::Float(_) | N::PosInt128(_) | N::NegInt128(_) => false,
         }
         #[cfg(feature = "arbitrary_precision")]
         self.as_u64().is_some()
@@ -114,7 +122,7 @@ impl Number {
         #[cfg(not(feature = "arbitrary_precision"))]
         match self.n {
             N::Float(_) => true,
-            N::PosInt(_) | N::NegInt(_) => false,
+            N::PosInt(_) | N::NegInt(_) | N::PosInt128(_) | N::NegInt128(_) => false,
         }
         #[cfg(feature = "arbitrary_precision")]
         {
@@ -140,7 +148,7 @@ impl Number {
                 }
             }
             N::NegInt(n) => Some(n),
-            N::Float(_) => None,
+            N::Float(_) | N::PosInt128(_) | N::NegInt128(_) => None,
         }
         #[cfg(feature = "arbitrary_precision")]
         self.n.parse().ok()
@@ -152,7 +160,7 @@ impl Number {
         #[cfg(not(feature = "arbitrary_precision"))]
         match self.n {
             N::PosInt(n) => Some(n),
-            N::NegInt(_) | N::Float(_) => None,
+            N::NegInt(_) | N::Float(_) | N::PosInt128(_) | N::NegInt128(_) => None,
         }
         #[cfg(feature = "arbitrary_precision")]
         self.n.parse().ok()
@@ -165,6 +173,8 @@ impl Number {
             N::PosInt(n) => Some(n as f64),
             N::NegInt(n) => Some(n as f64),
             N::Float(n) => Some(n),
+            N::PosInt128(n) => Some(n as f64),
+            N::NegInt128(n) => Some(n as f64),
         }
         #[cfg(feature = "arbitrary_precision")]
         self.n.parse::<f64>().ok().filter(|float| float.is_finite())
@@ -206,6 +216,8 @@ impl Number {
             N::PosInt(n) => Some(n as i128),
             N::NegInt(n) => Some(n as i128),
             N::Float(_) => None,
+            N::PosInt128(n) => i128::try_from(n).ok(),
+            N::NegInt128(n) => Some(n),
         }
         #[cfg(feature = "arbitrary_precision")]
         self.n.parse().ok()
@@ -217,7 +229,8 @@ impl Number {
         #[cfg(not(feature = "arbitrary_precision"))]
         match self.n {
             N::PosInt(n) => Some(n as u128),
-            N::NegInt(_) | N::Float(_) => None,
+            N::NegInt(_) | N::Float(_) | N::NegInt128(_) => None,
+            N::PosInt128(n) => Some(n),
         }
         #[cfg(feature = "arbitrary_precision")]
         self.n.parse().ok()
@@ -240,8 +253,10 @@ impl Number {
                     N::PosInt(u)
                 } else if let Ok(i) = i64::try_from(i) {
                     N::NegInt(i)
+                } else if i >= 0 {
+                    N::PosInt128(i as u128)
                 } else {
-                    return None;
+                    N::NegInt128(i)
                 }
             }
             #[cfg(feature = "arbitrary_precision")]
@@ -268,7 +283,7 @@ impl Number {
                 if let Ok(u) = u64::try_from(i) {
                     N::PosInt(u)
                 } else {
-                    return None;
+                    N::PosInt128(i)
                 }
             }
             #[cfg(feature = "arbitrary_precision")]
@@ -312,6 +327,8 @@ impl Number {
             N::PosInt(n) => Some(n as f32),
             N::NegInt(n) => Some(n as f32),
             N::Float(n) => Some(n as f32),
+            N::PosInt128(n) => Some(n as f32),
+            N::NegInt128(n) => Some(n as f32),
         }
         #[cfg(feature = "arbitrary_precision")]
         self.n.parse::<f32>().ok().filter(|float| float.is_finite())
@@ -351,6 +368,8 @@ impl Display for Number {
             N::PosInt(u) => formatter.write_str(itoa::Buffer::new().format(u)),
             N::NegInt(i) => formatter.write_str(itoa::Buffer::new().format(i)),
             N::Float(f) => formatter.write_str(ryu::Buffer::new().format_finite(f)),
+            N::PosInt128(u) => formatter.write_str(itoa::Buffer::new().format(u)),
+            N::NegInt128(i) => formatter.write_str(itoa::Buffer::new().format(i)),
         }
     }
 
@@ -376,6 +395,8 @@ impl Serialize for Number {
             N::PosInt(u) => serializer.serialize_u64(u),
             N::NegInt(i) => serializer.serialize_i64(i),
             N::Float(f) => serializer.serialize_f64(f),
+            N::PosInt128(u) => serializer.serialize_u128(u),
+            N::NegInt128(i) => serializer.serialize_i128(i),
         }
     }
 
@@ -540,6 +561,8 @@ macro_rules! deserialize_any {
                 N::PosInt(u) => visitor.visit_u64(u),
                 N::NegInt(i) => visitor.visit_i64(i),
                 N::Float(f) => visitor.visit_f64(f),
+                N::PosInt128(u) => visitor.visit_u128(u),
+                N::NegInt128(i) => visitor.visit_i128(i),
             }
         }
 
@@ -583,7 +606,13 @@ macro_rules! deserialize_number {
         where
             V: Visitor<'de>,
         {
-            self.deserialize_any(visitor)
+            match self.n {
+                N::PosInt(u) => visitor.$visit(u as _),
+                N::NegInt(i) => visitor.$visit(i as _),
+                N::Float(f) => visitor.$visit(f as _),
+                N::PosInt128(u) => visitor.$visit(u as _),
+                N::NegInt128(i) => visitor.$visit(i as _),
+            }
         }
 
         #[cfg(feature = "arbitrary_precision")]
@@ -727,6 +756,26 @@ impl From<ParserNumber> for Number {
                     itoa::Buffer::new().format(i).to_owned()
                 }
             }
+            ParserNumber::U128(u) => {
+                #[cfg(not(feature = "arbitrary_precision"))]
+                {
+                    N::PosInt128(u)
+                }
+                #[cfg(feature = "arbitrary_precision")]
+                {
+                    itoa::Buffer::new().format(u).to_owned()
+                }
+            }
+            ParserNumber::I128(i) => {
+                #[cfg(not(feature = "arbitrary_precision"))]
+                {
+                    N::NegInt128(i)
+                }
+                #[cfg(feature = "arbitrary_precision")]
+                {
+                    itoa::Buffer::new().format(i).to_owned()
+                }
+            }
             #[cfg(feature = "arbitrary_precision")]
             ParserNumber::String(s) => s,
         };
@@ -787,10 +836,49 @@ macro_rules! impl_from_signed {
 impl_from_unsigned!(u8, u16, u32, u64, usize);
 impl_from_signed!(i8, i16, i32, i64, isize);
 
-#[cfg(feature = "arbitrary_precision")]
-impl_from_unsigned!(u128);
-#[cfg(feature = "arbitrary_precision")]
-impl_from_signed!(i128);
+impl From<u128> for Number {
+    fn from(u: u128) -> Self {
+        let n = {
+            #[cfg(not(feature = "arbitrary_precision"))]
+            {
+                if let Ok(u64_val) = u64::try_from(u) {
+                    N::PosInt(u64_val)
+                } else {
+                    N::PosInt128(u)
+                }
+            }
+            #[cfg(feature = "arbitrary_precision")]
+            {
+                itoa::Buffer::new().format(u).to_owned()
+            }
+        };
+        Number { n }
+    }
+}
+
+impl From<i128> for Number {
+    fn from(i: i128) -> Self {
+        let n = {
+            #[cfg(not(feature = "arbitrary_precision"))]
+            {
+                if let Ok(u) = u64::try_from(i) {
+                    N::PosInt(u)
+                } else if let Ok(i64_val) = i64::try_from(i) {
+                    N::NegInt(i64_val)
+                } else if i >= 0 {
+                    N::PosInt128(i as u128)
+                } else {
+                    N::NegInt128(i)
+                }
+            }
+            #[cfg(feature = "arbitrary_precision")]
+            {
+                itoa::Buffer::new().format(i).to_owned()
+            }
+        };
+        Number { n }
+    }
+}
 
 impl Number {
     #[cfg(not(feature = "arbitrary_precision"))]
@@ -800,6 +888,7 @@ impl Number {
             N::PosInt(u) => Unexpected::Unsigned(u),
             N::NegInt(i) => Unexpected::Signed(i),
             N::Float(f) => Unexpected::Float(f),
+            N::PosInt128(_) | N::NegInt128(_) => Unexpected::Other("128-bit integer"),
         }
     }
 

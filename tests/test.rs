@@ -880,14 +880,6 @@ fn test_parse_f64() {
         ("0.00e-00", 0.0),
         ("3.5E-2147483647", 0.0),
         ("0.0100000000000000000001", 0.01),
-        (
-            &format!("{}", (i64::MIN as f64) - 1.0),
-            (i64::MIN as f64) - 1.0,
-        ),
-        (
-            &format!("{}", (u64::MAX as f64) + 1.0),
-            (u64::MAX as f64) + 1.0,
-        ),
         (&format!("{}", f64::EPSILON), f64::EPSILON),
         (
             "0.0000000000000000000000000000000000000000000000000123e50",
@@ -940,6 +932,14 @@ fn test_parse_f64() {
             1e308,
         ),
     ]);
+
+    // These values produce integer strings (no decimal point) that exceed u64
+    // range. They are parsed as u128/i128 in Value but still deserialize correctly
+    // as f64 via the direct deserialize path.
+    let v: f64 = from_str(&format!("{}", (i64::MIN as f64) - 1.0)).unwrap();
+    assert_eq!(v, (i64::MIN as f64) - 1.0);
+    let v: f64 = from_str(&format!("{}", (u64::MAX as f64) + 1.0)).unwrap();
+    assert_eq!(v, (u64::MAX as f64) + 1.0);
 }
 
 #[test]
@@ -2324,10 +2324,9 @@ fn test_integer128_to_value() {
         assert_eq!(to_value(integer128).unwrap().to_string(), expected);
     }
 
-    if !cfg!(feature = "arbitrary_precision") {
-        let err = to_value(u128::from(u64::MAX) + 1).unwrap_err();
-        assert_eq!(err.to_string(), "number out of range");
-    }
+    // u128 values beyond u64::MAX are now natively supported via PosInt128
+    let big = u128::from(u64::MAX) + 1;
+    assert_eq!(to_value(big).unwrap().to_string(), big.to_string());
 }
 
 #[cfg(feature = "raw_value")]
